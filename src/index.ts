@@ -34,11 +34,9 @@ function sendResponse(param: {
     allow?: string;
 }) {
     const { socket, statusCode, statusMessage, contentType, content, allow } = param;
-    console.log(param);
     const response = `HTTP/1.1 ${statusCode} ${statusMessage}\r\nContent-Type: ${contentType}\r\nContent-Length: ${Buffer.byteLength(
         content
     )}${allow ? `\r\nAllow: ${allow}` : ''}\r\n\r\n${content}`;
-    console.log(response);
     socket.write(response);
     socket.end();
 }
@@ -54,6 +52,8 @@ const server = createServer((socket) => {
 
             const parsedUrl = parse(requestPath || '', true);
             const filePath = `public${parsedUrl.pathname}`;
+
+            console.log({ requestMethod, requestPath });
 
             switch (requestMethod) {
                 case 'GET':
