@@ -1,10 +1,10 @@
-import http from 'http';
 import fs from 'fs';
-import path from 'path';
-import url from 'url';
+import { extname } from 'path';
+import { parse } from 'url';
+import { Socket, createServer } from 'net';
 
 function getMimeType(filePath: string) {
-    const ext = path.extname(filePath).toLowerCase();
+    const ext = extname(filePath).toLowerCase();
     const mimeTypes: { [key: string]: string } = {
         '.html': 'text/html',
         '.txt': 'text/plain',
@@ -12,99 +12,156 @@ function getMimeType(filePath: string) {
     return mimeTypes[ext] || 'application/octet-stream';
 }
 
-function sendHttpCat(res: http.ServerResponse, statusCode: number) {
+function sendHttpCat(param: { socket: Socket; statusCode: number; statusMessage: string }) {
+    const { socket, statusCode, statusMessage } = param;
     const httpCatUrl = `https://http.cat/${statusCode}.jpg`;
-    res.writeHead(statusCode, {
-        'Content-Type': 'text/html',
-    }).end(`<!DOCTYPE html><html lang="en"><body><img src="${httpCatUrl}" /></body></html>`);
+    const html = `<!DOCTYPE html><html lang="en"><body><img src="${httpCatUrl}" /></body></html>`;
+    sendResponse({
+        socket,
+        statusCode,
+        statusMessage,
+        contentType: 'text/html',
+        content: html,
+    });
 }
 
-const server = http.createServer((req, res) => {
-    const parsedUrl = url.parse(req.url || '', true);
-    const filePath = `public/${parsedUrl.pathname}`;
+function sendResponse(param: {
+    socket: Socket;
+    statusCode: number;
+    statusMessage: string;
+    contentType: string;
+    content: string | Buffer;
+    allow?: string;
+}) {
+    const { socket, statusCode, statusMessage, contentType, content, allow } = param;
+    console.log(param);
+    const response = `HTTP/1.1 ${statusCode} ${statusMessage}\r\nContent-Type: ${contentType}\r\nContent-Length: ${Buffer.byteLength(
+        content
+    )}${allow ? `\r\nAllow: ${allow}` : ''}\r\n\r\n${content}`;
+    console.log(response);
+    socket.write(response);
+    socket.end();
+}
 
-    switch (req.method) {
-        case 'GET':
-            fs.stat(filePath, (err, stats) => {
-                if (err || !stats.isFile()) {
-                    sendHttpCat(res, 404);
-                } else {
-                    const mimeType = getMimeType(filePath);
-                    res.writeHead(200, {
-                        'Content-Type': mimeType,
-                        'Content-Length': stats.size,
+const server = createServer((socket) => {
+    socket.on('data', (data) => {
+        const request = data.toString();
+        const requestEndIndex = request.indexOf('\r\n\r\n');
+
+        if (requestEndIndex >= 0) {
+            const requestHeaders = request.slice(0, requestEndIndex).split('\r\n');
+            const [requestMethod, requestPath] = requestHeaders[0].split(' ');
+
+            const parsedUrl = parse(requestPath || '', true);
+            const filePath = `public${parsedUrl.pathname}`;
+
+            switch (requestMethod) {
+                case 'GET':
+                    fs.readFile(filePath, (err, data) => {
+                        if (err) {
+                            sendHttpCat({ socket, statusCode: 404, statusMessage: 'Not Found' });
+                        } else {
+                            const mimeType = getMimeType(filePath);
+                            sendResponse({
+                                socket,
+                                statusCode: 200,
+                                statusMessage: 'OK',
+                                contentType: mimeType,
+                                content: data,
+                            });
+                        }
                     });
-                    fs.createReadStream(filePath).pipe(res);
-                }
-            });
-            break;
+                    break;
 
-        case 'POST':
-            if (getMimeType(filePath) === 'text/plain') {
-                const writeStream = fs.createWriteStream(filePath, { flags: 'a' });
-                req.pipe(writeStream);
-                req.on('end', () => {
-                    res.writeHead(200, { 'Content-Type': 'text/plain' });
-                    res.end('Data appended');
-                });
-            } else {
-                sendHttpCat(res, 415);
-            }
-            break;
-
-        case 'PUT':
-            const writeStream = fs.createWriteStream(filePath);
-            req.pipe(writeStream);
-            req.on('end', () => {
-                res.writeHead(200, { 'Content-Type': 'text/plain' });
-                res.end('File created or overwritten');
-            });
-            break;
-
-        case 'DELETE':
-            fs.unlink(filePath, (err) => {
-                if (err) {
-                    sendHttpCat(res, 404);
-                } else {
-                    res.writeHead(200, { 'Content-Type': 'text/plain' });
-                    res.end('File deleted');
-                }
-            });
-            break;
-
-        case 'OPTIONS':
-            const allowedMethods = ['GET'];
-            if (getMimeType(filePath) === 'text/plain') {
-                allowedMethods.push('POST', 'PUT', 'DELETE');
-            } else if (getMimeType(filePath) === 'text/html') {
-                allowedMethods.push('PUT', 'DELETE');
-            }
-            res.writeHead(200, {
-                'Content-Type': 'text/plain',
-                Allow: allowedMethods.join(', '),
-            });
-            res.end();
-            break;
-
-        case 'HEAD':
-            fs.stat(filePath, (err, stats) => {
-                if (err || !stats.isFile()) {
-                    sendHttpCat(res, 404);
-                } else {
-                    const mimeType = getMimeType(filePath);
-                    console.log(mimeType);
-                    res.writeHead(200, {
-                        'Content-Type': mimeType,
-                        'Content-Length': stats.size,
+                case 'POST':
+                    if (getMimeType(filePath) !== 'text/plain') {
+                        sendHttpCat({ socket, statusCode: 415, statusMessage: 'Unsupported Media Type' });
+                        break;
+                    }
+                    fs.appendFile(filePath, request.slice(requestEndIndex + 4), (err) => {
+                        if (err) {
+                            sendHttpCat({ socket, statusCode: 500, statusMessage: 'Internal Server Error' });
+                        } else {
+                            sendResponse({
+                                socket,
+                                statusCode: 200,
+                                statusMessage: 'OK',
+                                contentType: 'text/plain',
+                                content: 'Data appended',
+                            });
+                        }
                     });
-                    res.end();
-                }
-            });
-            break;
+                    break;
 
-        default:
-            sendHttpCat(res, 405);
-    }
+                case 'PUT':
+                    fs.writeFile(filePath, request.slice(requestEndIndex + 4), (err) => {
+                        if (err) {
+                            sendHttpCat({ socket, statusCode: 500, statusMessage: 'Internal Server Error' });
+                        } else {
+                            sendResponse({
+                                socket,
+                                statusCode: 200,
+                                statusMessage: 'OK',
+                                contentType: 'text/plain',
+                                content: 'File created or overwritten',
+                            });
+                        }
+                    });
+                    break;
+
+                case 'DELETE':
+                    fs.unlink(filePath, (err) => {
+                        if (err) {
+                            sendHttpCat({ socket, statusCode: 404, statusMessage: 'Not Found' });
+                        } else {
+                            sendResponse({
+                                socket,
+                                statusCode: 200,
+                                statusMessage: 'OK',
+                                contentType: 'text/plain',
+                                content: 'File deleted',
+                            });
+                        }
+                    });
+                    break;
+
+                case 'OPTIONS':
+                    const allowedMethods = ['GET', 'HEAD', 'PUT', 'DELETE'];
+                    if (getMimeType(filePath) === 'text/plain') {
+                        allowedMethods.push('POST');
+                    }
+                    sendResponse({
+                        socket,
+                        statusCode: 200,
+                        statusMessage: 'OK',
+                        contentType: 'text/plain',
+                        content: '',
+                        allow: allowedMethods.join(', '),
+                    });
+                    break;
+
+                case 'HEAD':
+                    fs.readFile(filePath, (err) => {
+                        const mimeType = getMimeType(filePath);
+                        sendResponse({
+                            socket,
+                            statusCode: err ? 404 : 200,
+                            statusMessage: err ? 'Not Found' : 'OK',
+                            contentType: mimeType,
+                            content: '',
+                        });
+                    });
+                    break;
+
+                default:
+                    sendHttpCat({ socket, statusCode: 405, statusMessage: 'Method Not Allowed' });
+            }
+        }
+    });
+
+    socket.on('error', (err) => {
+        console.error('Socket error:', err);
+    });
 });
 
 const PORT = 3000;
